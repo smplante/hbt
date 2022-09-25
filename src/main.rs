@@ -1,12 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use std::time::{Duration, Instant};
 
-use crate::{cli::parse_args, requests::orchestrate_requests};
-use futures::future::join_all;
+use crate::{cli::parse_args, requests::request_runtime};
 use hdrhistogram::Histogram;
-use tokio::time::timeout;
+use signal_hook::low_level::exit;
 
 mod cli;
 mod requests;
+
+const QUANTILES: [f64; 34] = [
+    0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80,
+    0.85, 0.90, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 0.999, 0.9999, 0.99999,
+    0.999999, 0.9999999, 0.99999999, 1.0,
+];
 
 fn main() {
     let args = parse_args();
@@ -22,55 +27,20 @@ fn main() {
         .build()
         .expect("runtime should be created");
 
-    let headers = Arc::new(args.headers);
+    let start = Instant::now();
+    multi_threaded_runtime.block_on(request_runtime(args, histogram.recorder()));
+    let elapsed = start.elapsed();
 
-    multi_threaded_runtime.block_on(async {
-        let c = reqwest::Client::builder().build().unwrap();
-        let _ = c
-            .request(args.method.clone(), args.url.as_str())
-            .send()
-            .await;
+    histogram.refresh_timeout(Duration::from_millis(10));
 
-        let headers = headers;
-
-        let clients = join_all((0..args.connections).map(|_| async {
-            let client = reqwest::Client::builder().build().unwrap();
-
-            let mut req = client.request(args.method.to_owned(), args.url.to_string());
-            for header in headers.iter() {
-                req = req.header(header.name.to_owned(), header.value.to_owned())
-            }
-            req.send().await.expect("client failed to warmup");
-
-            client
-        }))
-        .await;
-
-        let start = std::time::Instant::now();
-        let spawns = clients.iter().map(|c| {
-            timeout(
-                Duration::from_secs(args.duration + args.timeout),
-                orchestrate_requests(
-                    c.to_owned(),
-                    args.method.clone(),
-                    headers.clone(),
-                    args.url.to_string(),
-                    histogram.recorder().into_idle(),
-                    args.rps,
-                    args.duration,
-                ),
-            )
-        });
-
-        join_all(spawns).await;
-
+    QUANTILES.iter().for_each(|&q| {
         println!(
-            "finished all requests in {:?} ms",
-            start.elapsed().as_millis()
+            "{:>10.6} %    {:>10}    {:>10}",
+            q * 100.0,
+            histogram.value_at_quantile(q),
+            histogram.count_between(0, histogram.value_at_quantile(q))
         )
     });
-
-    histogram.refresh_timeout(Duration::from_millis(10000));
 
     println!(
         "max: {:?}, mean: {:?}, median: {:?}, min: {:?}, stddev: {:?}, total: {:?}",
@@ -81,4 +51,7 @@ fn main() {
         histogram.stdev(),
         histogram.count_between(histogram.min(), histogram.max())
     );
+
+    println!("finished all requests in {:?} ms", elapsed.as_millis());
+    exit(0);
 }

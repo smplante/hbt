@@ -8,8 +8,12 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.65"
 clap = { version = "3.2.22", features = ["derive"] }
+flume = "0.10.14"
 futures = "0.3.24"
 hdrhistogram = "7.5.2"
 http = "0.2.8"
-reqwest = "0.11.12"
-tokio = { version = "1.21.1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+hyper = { version = "0.14.20", features = ["client", "http1", "http2"] }
+rlimit = "0.8.3"
+signal-hook = "0.3.14"
+tokio = { version = "1.21.1", features = ["rt", "rt-multi-thread", "macros"] }
+trust-dns-resolver = "0.22.0"
