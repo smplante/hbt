@@ -4,9 +4,8 @@ use anyhow::anyhow;
 use clap::Parser;
 use http::{
     header::{HeaderName, HeaderValue},
-    Method,
+    Method, Uri,
 };
-use reqwest::Url;
 
 /// Simple program to make a lot of HTTP requests
 #[derive(Parser, Debug)]
@@ -22,36 +21,33 @@ pub(crate) struct Args {
     #[clap(long, default_value_t = 30)]
     pub timeout: u64,
     /// Total number of concurrent connections
-    #[clap(short, long, default_value_t = 1)]
+    #[clap(short, long, default_value_t = 1 << 10)]
     pub connections: u64,
     /// Total number of threads to use
     #[clap(short, long, default_value_t = 1)]
     pub threads: usize,
-    /// Show terminal UI with live updating results table and latency graph
+    /// TODO: Show terminal UI with live updating results table and latency graph
     #[clap(long, parse(from_flag))]
     pub tui: bool,
-
     /// URL to make requests agains
     #[clap(value_parser)]
-    pub url: Url,
-
+    pub url: Uri,
+    /// Headers to include on requests
+    #[clap(short = 'm', long = "method", default_value_t = Method::GET)]
+    pub method: Method,
     /// Headers to include in all requests
     ///
     /// e.g. -H 'Authorization: Basic aGJ0OmhidA=='
     #[clap(short = 'H', long = "header")]
     pub headers: Vec<Header>,
-    /// Request body to include in all requests
+    /// TODO: Request body to include in all requests
     ///
     /// e.g. -b '{"custom":"json","request":{"body":0}}'
     #[clap(short, long)]
     pub body: Option<String>,
-    /// File containing the request body to include in all requests
+    /// TODO: File containing the request body to include in all requests
     #[clap(short, long)]
     pub file: Option<String>,
-
-    /// Headers to include on requests
-    #[clap(short = 'm', long = "method", default_value_t = Method::GET)]
-    pub method: Method,
 }
 
 #[derive(Debug)]
@@ -77,6 +73,14 @@ impl FromStr for Header {
 
 pub(crate) fn parse_args() -> Args {
     let args = Args::parse();
+
+    match args.url.host() {
+        Some("") | None => {
+            eprintln!("invalid target host {}", args.url.authority().unwrap());
+            exit(1)
+        }
+        Some(_) => (),
+    }
 
     match args.method {
         Method::GET
