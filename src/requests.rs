@@ -17,7 +17,7 @@ use http::{
 };
 use hyper::{client::conn::SendRequest, Body};
 use signal_hook::{consts::SIGINT, iterator::Signals, low_level::exit};
-use tokio::time::timeout_at;
+use tokio::time::{interval, timeout_at};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 use crate::cli::Args;
@@ -197,11 +197,18 @@ pub(crate) async fn request_runtime(args: Args, recorder: Recorder<u64>) {
     tokio::spawn(async move {
         let canceled = canceled_clone;
         let mut signals = Signals::new(&[SIGINT]).unwrap();
-        for _ in signals.forever() {
-            canceled
-                .compare_exchange(false, true, Ordering::Release, Ordering::SeqCst)
-                .unwrap();
-            exit(1)
+        let mut interval = interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            match signals.pending().next() {
+                Some(SIGINT) => {
+                    canceled
+                        .compare_exchange(false, true, Ordering::Release, Ordering::SeqCst)
+                        .unwrap();
+                    exit(1)
+                }
+                _ => (),
+            }
         }
     });
 
