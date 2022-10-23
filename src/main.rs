@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use crate::{cli::parse_args, requests::request_runtime};
 use hdrhistogram::Histogram;
-use signal_hook::low_level::exit;
 
 mod cli;
 mod requests;
@@ -16,7 +15,7 @@ const QUANTILES: [f64; 34] = [
 fn main() {
     let args = parse_args();
 
-    let mut histogram = Histogram::<u64>::new_with_max(60 * 1_000_000, 5)
+    let mut histogram = Histogram::<u64>::new(5)
         .expect("histogram should be creatable")
         .into_sync();
 
@@ -53,5 +52,4 @@ fn main() {
     );
 
     println!("finished all requests in {:?} ms", elapsed.as_millis());
-    exit(0);
 }

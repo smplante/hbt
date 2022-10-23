@@ -21,7 +21,7 @@ pub(crate) struct Args {
     #[clap(long, default_value_t = 30)]
     pub timeout: u64,
     /// Total number of concurrent connections
-    #[clap(short, long, default_value_t = 1 << 10)]
+    #[clap(short, long, default_value_t = 1 << 6)]
     pub connections: u64,
     /// Total number of threads to use
     #[clap(short, long, default_value_t = 1)]
@@ -29,6 +29,9 @@ pub(crate) struct Args {
     /// TODO: Show terminal UI with live updating results table and latency graph
     #[clap(long, parse(from_flag))]
     pub tui: bool,
+    /// Each request is a span sent to a default OpenTelemetry collector via grpc
+    #[clap(long, parse(from_flag))]
+    pub opentelemetry: bool,
     /// URL to make requests agains
     #[clap(value_parser)]
     pub url: Uri,

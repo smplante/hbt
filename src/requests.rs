@@ -16,6 +16,15 @@ use http::{
     Request, Uri,
 };
 use hyper::{client::conn::SendRequest, Body};
+use opentelemetry::{
+    global, runtime,
+    sdk::{
+        trace::{Config},
+        Resource,
+    },
+    trace::{FutureExt, SpanKind, TraceContextExt, TraceError},
+    Context, KeyValue,
+};
 use signal_hook::{consts::SIGINT, iterator::Signals, low_level::exit};
 use tokio::time::{interval, timeout_at};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
@@ -39,7 +48,7 @@ impl ConnectionPool {
         canceled: Arc<AtomicBool>,
     ) -> Result<Self, anyhow::Error> {
         let connections = connections.min(1 << 15);
-        rlimit::increase_nofile_limit(connections)?;
+        rlimit::increase_nofile_limit(connections + 100)?;
         let limits = rlimit::getrlimit(rlimit::Resource::NOFILE)?;
         let connections = limits.0.min(connections);
         let (push, senders) = flume::bounded::<SendRequest<Body>>(connections.try_into()?);
@@ -81,7 +90,7 @@ impl ConnectionPool {
                 }
                 Ok(Ok(stream)) => stream,
             };
-            stream.set_nodelay(true)?;
+            // stream.set_nodelay(true)?;
 
             let handshake_timeout = timeout_at(
                 start + Duration::from_secs(4),
@@ -110,6 +119,9 @@ impl ConnectionPool {
 
         for sender in sender_vec {
             if let Ok(sender) = sender {
+                // let tracer = global::tracer("SendRequest");
+                // let span = opentelemetry::trace::Tracer::start(&tracer, format!("id: {}", i));
+                // let cx = Context::current_with_span(span);
                 push.send(sender)?;
                 i += 1;
             }
@@ -138,7 +150,19 @@ impl ConnectionPool {
 
         let start = Instant::now();
 
-        if let Ok(mut sender) = self.senders.recv_async().await {
+        let tracer = global::tracer("perform_request");
+        let span = opentelemetry::trace::Tracer::span_builder(&tracer, "senders.recv_async")
+            .with_kind(SpanKind::Client)
+            .start(&tracer);
+        if let Ok(mut sender) = self
+            .senders
+            .recv_async()
+            .with_context(Context::current_with_span(span))
+            .await
+        {
+            // let sender_num = sender.1;
+            // let cx = Context::current_with_span(span);
+
             let delayed = start.elapsed().as_micros() > 1000;
 
             let mut req = Request::builder()
@@ -150,24 +174,41 @@ impl ConnectionPool {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone())),
             );
-            let req = req.body(body).unwrap();
+            let req = req.body(body)?;
 
-            sender.send_request(req).await.unwrap();
-
+            // let mut span = opentelemetry::trace::Tracer::span_builder(&tracer, "sender.send_request").with_kind(SpanKind::Client).start(&tracer);
+            // span.set_attribute(KeyValue::new("sender", sender_num));
+            {
+                sender
+                    .send_request(req)
+                    // .with_context(Context::current_with_span(span))
+                    .await?;
+            }
             let elapsed = start.elapsed();
 
-            self.push.send(sender).unwrap();
+            // let mut span = opentelemetry::trace::Tracer::span_builder(&tracer, "push.send_async").with_kind(SpanKind::Client).start(&tracer);
+            // span.set_attribute(KeyValue::new("sender", sender_num));
+            self.push
+                .send_async(sender)
+                // .with_context(Context::current_with_span(span))
+                .await?;
+            // get_active_span(|span| {
+            //     span.set_attribute(KeyValue::new("sender", sender_num))
+            // });
 
             if self.canceled.load(Ordering::SeqCst) {
                 return Err(anyhow!("application canceled"));
             }
 
+            // let mut span = opentelemetry::trace::Tracer::span_builder(&tracer, "timer.send_async").with_kind(SpanKind::Client).start(&tracer);
+            // span.set_attribute(KeyValue::new("sender", sender_num));
             self.timer
                 .send_async((
                     elapsed.as_secs() * 1_000_000
                         + <u32 as Into<u64>>::into(elapsed.subsec_micros()),
                     delayed,
                 ))
+                // .with_context(Context::current_with_span(span))
                 .await?;
 
             return Ok(elapsed);
@@ -176,7 +217,51 @@ impl ConnectionPool {
     }
 }
 
+fn init_tracer(export: bool) -> Result<(), TraceError> {
+    let span_processor = match export {
+        true => {
+            println!("CAUTION: Exporting OpenTelemetry spans can impact benchmarking performance under heavy loads");
+
+            let exporter = opentelemetry_otlp::SpanExporterBuilder::Tonic(
+                opentelemetry_otlp::new_exporter().tonic(),
+            )
+            .build_span_exporter()?;
+
+            opentelemetry::sdk::trace::BatchSpanProcessor::builder(exporter, runtime::Tokio)
+                .with_max_queue_size(10 << 15)
+                .with_scheduled_delay(Duration::from_millis(100))
+                .with_max_export_batch_size(1 << 14)
+                .with_max_concurrent_exports(1 << 3)
+                .build()
+        }
+        false => {
+            let exporter = opentelemetry_sdk::testing::trace::NoopSpanExporter::new();
+
+            opentelemetry::sdk::trace::BatchSpanProcessor::builder(exporter, runtime::Tokio)
+                .with_max_queue_size(10 << 15)
+                .with_scheduled_delay(Duration::from_millis(100))
+                .with_max_export_batch_size(1 << 14)
+                .with_max_concurrent_exports(1 << 3)
+                .build()
+        }
+    };
+
+    let provider = opentelemetry::sdk::trace::TracerProvider::builder()
+        .with_span_processor(span_processor)
+        .with_config(
+            Config::default()
+                .with_resource(Resource::new([KeyValue::new("service.name", "hbt-otlp")])),
+        )
+        .build();
+
+    let _ = global::set_tracer_provider(provider);
+
+    Ok(())
+}
+
 pub(crate) async fn request_runtime(args: Args, recorder: Recorder<u64>) {
+    init_tracer(args.opentelemetry).expect("tracer should be set");
+
     let mut req = Request::builder()
         .header(ACCEPT, "*/*")
         .header(HOST, args.url.authority().unwrap().as_str())
@@ -221,6 +306,7 @@ pub(crate) async fn request_runtime(args: Args, recorder: Recorder<u64>) {
             }
         };
 
+    let start = Instant::now();
     let perform_requests = tokio::spawn(perform_requests(connection_pool, args.rps, args.duration));
 
     let record_request_timings = tokio::spawn(record_request_timings(
@@ -230,7 +316,19 @@ pub(crate) async fn request_runtime(args: Args, recorder: Recorder<u64>) {
     ));
 
     perform_requests.await.unwrap();
+
+    println!(
+        "finished making all requests in {:?} ms",
+        start.elapsed().as_millis()
+    );
+
     record_request_timings.await.unwrap();
+
+    println!(
+        "finished all requests in {:?} ms",
+        start.elapsed().as_millis()
+    );
+    global::shutdown_tracer_provider();
 }
 
 async fn perform_requests(connection_pool: Arc<ConnectionPool>, rps: u64, duration: u64) {
@@ -242,7 +340,14 @@ async fn perform_requests(connection_pool: Arc<ConnectionPool>, rps: u64, durati
     for _ in 0..(rps * duration) {
         interval.tick().await;
         let ct = ct.clone();
-        tokio::spawn(async move { ct.perform_request(Body::empty()).await });
+        {
+            let tracer = global::tracer("perform_request");
+            let span = opentelemetry::trace::Tracer::span_builder(&tracer, "perform_request")
+                .with_kind(SpanKind::Producer)
+                .start(&tracer);
+            let cx = Context::current_with_span(span);
+            tokio::spawn(async move { ct.perform_request(Body::empty()).with_context(cx).await });
+        }
     }
 
     println!(
